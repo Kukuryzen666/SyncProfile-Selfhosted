@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.5"
+__version__ = "11.0.0-beta.1"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -219,6 +219,29 @@ def _build_peer_color(color_id: Any, bg_emoji_id: Any = None):
         return pc
     except Exception:
         return None
+
+def _sanitize_emoji_id_input(raw: Any) -> str:
+    if not raw:
+        return ""
+    text = str(raw).strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        return text
+    import re
+    # Parse parameter query format: id=12345, emoji=12345, doc=12345
+    m = re.search(r"(?:id|emoji|doc|document)[=_: ]*(\d{10,25})", text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    # Match any 10+ digit continuous number sequence in url or text
+    m_any = re.search(r"\b(\d{10,25})\b", text)
+    if m_any:
+        return m_any.group(1)
+    # Fallback to single extracted group of digits if length >= 5
+    digits = re.findall(r"\d+", text)
+    if len(digits) == 1 and len(digits[0]) >= 5:
+        return digits[0]
+    return ""
 
 class Plugin(BasePlugin):
     def __init__(self):
@@ -2239,15 +2262,145 @@ class Plugin(BasePlugin):
             return
         async def _worker():
             cur_val = str(self._get_slot_val(acc_idx, field_key, "") or "")
-            res = await UI.StringInputDialog.show(title, initial_text=cur_val, hint="Document ID (например: 5299025466055734222)")
+            res = await UI.StringInputDialog.show(
+                title=f"✨ {title}",
+                initial_text=cur_val,
+                hint="Document ID или ссылка (например 5299025466055734222)",
+            )
             if res is not None:
-                clean_val = str(res).strip()
+                raw_str = str(res).strip()
+                if raw_str == "":
+                    clean_val = ""
+                else:
+                    clean_val = _sanitize_emoji_id_input(raw_str)
+                    if not clean_val:
+                        bulletins.show_error("Не удалось найти Document ID в введенном тексте!")
+                        return
+
                 self._set_slot_val(acc_idx, field_key, clean_val)
                 self._save_local_profiles_cache(force=True)
                 self._apply_all_to_all_accounts()
                 self.push_specific_account(acc_idx, show_ui_bulletin=False)
-                bulletins.show_success(f"✨ Сохранено: {clean_val or 'Очищено'}")
+                if clean_val:
+                    bulletins.show_success(f"✨ Сохранен ID: {clean_val}")
+                else:
+                    bulletins.show_info("Узор/эмодзи очищен")
+                try:
+                    from zwylib import SettingsManager
+                    SettingsManager.reload()
+                except Exception:
+                    pass
         async_manager.run_task(_worker())
+
+    def _show_emoji_help_dialog(self):
+        if not HAS_ZWYLIB:
+            return
+        async def _worker():
+            help_text = (
+                "ℹ️ Как получить Document ID для эмодзи или узора:\n\n"
+                "1️⃣ В контекстном меню сообщения:\n"
+                "   • Нажмите на сообщение с эмодзи и выберите «🆔 Скопировать Emoji Document ID».\n\n"
+                "2️⃣ Через Telegram-бота:\n"
+                "   • Перешлите кастомный эмодзи боту @get_emoji_id_bot или @showdocumentidbot.\n"
+                "   • Скопируйте полученный числовой Document ID.\n\n"
+                "3️⃣ Через ссылку на эмодзи:\n"
+                "   • Скопируйте ссылку (t.me/addemoji/...) и вставьте в поле ввода — плагин сам извлечет ID!"
+            )
+            await UI.AlertDialog.show(
+                title="✨ Справка по Document ID",
+                message=help_text,
+                positive_text="Понятно",
+            )
+        async_manager.run_task(_worker())
+
+    def _import_settings_from_current_account(self, acc_idx: int, show_bulletin: bool = True):
+        try:
+            from org.telegram.messenger import UserConfig
+            u_cfg = UserConfig.getInstance(acc_idx)
+            if not u_cfg:
+                if show_bulletin:
+                    bulletins.show_error("Аккаунт не найден")
+                return
+            curr_user = u_cfg.getCurrentUser()
+            if not curr_user:
+                if show_bulletin:
+                    bulletins.show_error("Пользователь не найден")
+                return
+
+            if hasattr(curr_user, "color") and curr_user.color is not None:
+                nc = int(getattr(curr_user.color, "color", 0) or 0)
+                self._set_slot_val(acc_idx, "name_color", nc)
+                bg_em = getattr(curr_user.color, "background_emoji_id", 0)
+                if bg_em:
+                    self._set_slot_val(acc_idx, "name_bg_emoji_id", str(bg_em))
+
+            if hasattr(curr_user, "profile_color") and curr_user.profile_color is not None:
+                prc = int(getattr(curr_user.profile_color, "color", 0) or 0)
+                self._set_slot_val(acc_idx, "profile_color", prc)
+                p_bg = getattr(curr_user.profile_color, "background_emoji_id", 0)
+                if p_bg:
+                    self._set_slot_val(acc_idx, "profile_bg_emoji_id", str(p_bg))
+
+            if hasattr(curr_user, "emoji_status") and curr_user.emoji_status is not None:
+                doc_id = getattr(curr_user.emoji_status, "document_id", 0)
+                if doc_id:
+                    self._set_slot_val(acc_idx, "emoji_status_id", str(doc_id))
+
+            self._save_local_profiles_cache(force=True)
+            self._apply_all_to_all_accounts()
+            if show_bulletin:
+                bulletins.show_success("Цвета успешно импортированы из Telegram!")
+            try:
+                from zwylib import SettingsManager
+                SettingsManager.reload()
+            except Exception:
+                pass
+        except Exception as e:
+            if show_bulletin:
+                bulletins.show_error(f"Ошибка импорта: {e}")
+
+    def _grab_settings_from_local_premium(self, acc_idx: int, show_bulletin: bool = True):
+        try:
+            from com.radolyn.ayugram import AyuConfig
+            imported = False
+            if hasattr(AyuConfig, "nameColor"):
+                nc = int(getattr(AyuConfig, "nameColor", 0) or 0)
+                self._set_slot_val(acc_idx, "name_color", nc)
+                imported = True
+            if hasattr(AyuConfig, "nameCustomEmojiId"):
+                nbg = getattr(AyuConfig, "nameCustomEmojiId", 0)
+                if nbg:
+                    self._set_slot_val(acc_idx, "name_bg_emoji_id", str(nbg))
+            if hasattr(AyuConfig, "profileColor"):
+                prc = int(getattr(AyuConfig, "profileColor", 0) or 0)
+                self._set_slot_val(acc_idx, "profile_color", prc)
+                imported = True
+            if hasattr(AyuConfig, "profileCustomEmojiId"):
+                pbg = getattr(AyuConfig, "profileCustomEmojiId", 0)
+                if pbg:
+                    self._set_slot_val(acc_idx, "profile_bg_emoji_id", str(pbg))
+            if hasattr(AyuConfig, "statusEmojiId"):
+                sem = getattr(AyuConfig, "statusEmojiId", 0)
+                if sem:
+                    self._set_slot_val(acc_idx, "emoji_status_id", str(sem))
+
+            if imported:
+                self._set_slot_val(acc_idx, "premium", True)
+                self._save_local_profiles_cache(force=True)
+                self._apply_all_to_all_accounts()
+                if show_bulletin:
+                    bulletins.show_success("Настройки успешно считаны из локального Premium!")
+                try:
+                    from zwylib import SettingsManager
+                    SettingsManager.reload()
+                except Exception:
+                    pass
+            else:
+                if show_bulletin:
+                    bulletins.show_info("В настройках приложения не найдено кастомных цветов.")
+        except Exception as e:
+            if show_bulletin:
+                bulletins.show_error(f"Ошибка считывания: {e}")
 
     def _interactive_sync_bottom_sheet(self):
         if not HAS_ZWYLIB:
@@ -2525,7 +2678,7 @@ class Plugin(BasePlugin):
                 key="enable_sync",
                 text="Включить SyncProfile",
                 default=True,
-                subtext="Отображать кастомные профили и цвета других пользователей плагина",
+                subtext="Отображать кастомные цвета, узоры и статусы пользователей",
                 icon="msg_sync",
             ),
         ]
@@ -2536,134 +2689,188 @@ class Plugin(BasePlugin):
                     key="server_url",
                     text="URL сервера",
                     default=DEFAULT_SERVER_URL,
-                    subtext="Адрес сервера (https://sync.efn.mom)",
+                    subtext="Адрес бэкенд сервера (https://sync.efn.mom)",
                     icon="msg_link",
                 ),
                 Input(
                     key="custom_cookie",
                     text="Секретный токен Cookie",
                     default=DEFAULT_SECRET_COOKIE,
-                    subtext="Ключ авторизации для доступа к sync.efn.mom",
+                    subtext="Ключ авторизации для доступа к API сервера",
                     icon="msg_secret",
                 ),
             ])
 
-        items.extend([
-            Divider(text="Общие действия"),
+        active_accs = self._get_active_accounts_data()
+        if not active_accs:
+            active_accs = [{"acc_idx": 0, "user_id": 0, "name": "Основной аккаунт", "extra": "", "is_current": True}]
+
+        saved_slot = int(self.get_setting("_ui_selected_acc_slot", 0) or 0)
+        valid_indices = [a["acc_idx"] for a in active_accs]
+        if saved_slot not in valid_indices:
+            saved_slot = valid_indices[0]
+
+        sel_acc = next((a for a in active_accs if a["acc_idx"] == saved_slot), active_accs[0])
+        sel_idx = sel_acc["acc_idx"]
+        sel_uid = sel_acc.get("user_id", 0)
+        sel_name = sel_acc.get("name", f"Аккаунт {sel_idx + 1}")
+        is_curr = sel_acc.get("is_current", False)
+
+        items.append(Divider(text="👤 Профиль и кастомизация"))
+
+        if len(active_accs) > 1:
+            acc_labels = []
+            for a in active_accs:
+                idx = a["acc_idx"]
+                u_name = a.get("name", f"Аккаунт {idx + 1}")
+                tag = " (Активный)" if a.get("is_current") else ""
+                acc_labels.append(f"{idx + 1}. {u_name}{tag}")
+
+            items.append(
+                Selector(
+                    key="_ui_selected_acc_slot",
+                    text="Выбор аккаунта",
+                    default=saved_slot,
+                    items=acc_labels,
+                    subtext="Выберите аккаунт для редактирования его профиля",
+                    icon="msg_user",
+                    on_change=lambda val: self.set_setting("_ui_selected_acc_slot", val, reload_settings=True),
+                )
+            )
+
+        cur_prem = bool(self._get_slot_val(sel_idx, "premium", True))
+        cur_name_c = int(self._get_slot_val(sel_idx, "name_color", 0) or 0)
+        cur_prof_c = int(self._get_slot_val(sel_idx, "profile_color", 0) or 0)
+
+        if cur_name_c < 0 or cur_name_c >= len(NAME_AND_REPLY_COLORS):
+            cur_name_c = 0
+        if cur_prof_c < 0 or cur_prof_c >= len(PROFILE_COLORS):
+            cur_prof_c = 0
+
+        cur_name_bg = str(self._get_slot_val(sel_idx, "name_bg_emoji_id", "") or "").strip()
+        cur_prof_bg = str(self._get_slot_val(sel_idx, "profile_bg_emoji_id", "") or "").strip()
+        cur_em_id = str(self._get_slot_val(sel_idx, "emoji_status_id", "") or "").strip()
+
+        name_c_title = NAME_AND_REPLY_COLORS[cur_name_c]
+        prof_c_title = PROFILE_COLORS[cur_prof_c]
+
+        items.append(
             Text(
-                text="⚡ Быстрая дельта-синхронизация",
-                subtext="Запросить только новые и измененные профили с сервера (быстро и экономно)",
-                icon="msg_sync",
+                text=f"📋 Профиль: {sel_name} (ID: {sel_uid or '—'})",
+                subtext=f"Цвет имени: {name_c_title}\nОбложка: {prof_c_title}\nСтатус: {'⭐ ' + cur_em_id if cur_em_id else 'Обычный'}",
+                icon="msg_info",
                 accent=True,
-                on_click=lambda view: self.sync_delta_updates_from_server(show_bulletin=True),
+                on_click=lambda view, a=sel_idx: self.push_specific_account(a, show_ui_bulletin=True),
+            )
+        )
+
+        items.extend([
+            Switch(
+                key=f"slot_{sel_idx}_premium",
+                text="Telegram Premium",
+                default=cur_prem,
+                subtext=f"Включить премиум-эффекты и значок для {sel_name}",
+                icon="msg_premium",
+                on_change=lambda val, a=sel_idx: (self._set_slot_val(a, "premium", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
+            ),
+            Selector(
+                key=f"slot_{sel_idx}_name_color",
+                text="Цвет имени и полосы ответов",
+                default=cur_name_c,
+                items=NAME_AND_REPLY_COLORS,
+                subtext=f"Текущий: {name_c_title}",
+                icon="msg_palette",
+                on_change=lambda idx, a=sel_idx: (self._set_slot_val(a, "name_color", idx), run_on_ui_thread(self._apply_all_to_all_accounts)),
             ),
             Text(
-                text="🌐 Опубликовать ВСЕ мои аккаунты сразу",
-                subtext="Отправить индивидуальные цвета всех аккаунтов на сервер в один клик",
+                text="Узор имени и реплаев",
+                subtext=f"{'✨ ID: ' + cur_name_bg if cur_name_bg else 'Не установлен (нажмите для ввода)'}",
+                icon="msg_background",
+                on_click=lambda view, a=sel_idx: self._interactive_input_emoji_id(a, "name_bg_emoji_id", "Узор имени и реплаев"),
+            ),
+            Selector(
+                key=f"slot_{sel_idx}_profile_color",
+                text="Цвет фона профиля (обложки)",
+                default=cur_prof_c,
+                items=PROFILE_COLORS,
+                subtext=f"Текущий: {prof_c_title}",
+                icon="msg_theme",
+                on_change=lambda idx, a=sel_idx: (self._set_slot_val(a, "profile_color", idx), run_on_ui_thread(self._apply_all_to_all_accounts)),
+            ),
+            Text(
+                text="Узор фона профиля (обложки)",
+                subtext=f"{'✨ ID: ' + cur_prof_bg if cur_prof_bg else 'Не установлен (значки вокруг аватара)'}",
+                icon="msg_background",
+                on_click=lambda view, a=sel_idx: self._interactive_input_emoji_id(a, "profile_bg_emoji_id", "Узор фона профиля"),
+            ),
+            Text(
+                text="Премиум эмодзи-статус",
+                subtext=f"{'⭐ ID: ' + cur_em_id if cur_em_id else 'Не установлен (значок рядом с именем)'}",
+                icon="msg_emoji",
+                on_click=lambda view, a=sel_idx: self._interactive_input_emoji_id(a, "emoji_status_id", "Премиум эмодзи-статус"),
+            ),
+            Text(
+                text=f"🚀 Опубликовать профиль {sel_name}",
+                subtext=f"Отправить настроенные цвета ID {sel_uid} на сервер",
                 icon="msg_send",
                 accent=True,
-                on_click=lambda view: self.push_all_accounts(show_ui_bulletin=True),
-            ),
-            Text(
-                text=f"📥 Полное скачивание базы ({total_cached} в кэше)",
-                subtext="Удалить старый локальный кэш и начисто скачать актуальную базу с сервера",
-                icon="msg_download",
-                accent=True,
-                on_click=lambda view: self._interactive_sync_bottom_sheet(),
+                on_click=lambda view, a=sel_idx: self.push_specific_account(a, show_ui_bulletin=True),
             ),
         ])
 
-        active_accs = self._get_active_accounts_data()
+        items.extend([
+            Divider(text="⚡ Быстрые действия"),
+            Text(
+                text="📥 Считать из официального Telegram",
+                subtext=f"Скопировать цвета и узоры из текущего Telegram аккаунта ({sel_name})",
+                icon="msg_download",
+                accent=True,
+                on_click=lambda view, a=sel_idx: self._import_settings_from_current_account(a, show_bulletin=True),
+            ),
+            Text(
+                text="✨ Считать из локального Premium",
+                subtext=f"Загрузить цвета и эмодзи из настроек приложения для {sel_name}",
+                icon="msg_premium",
+                accent=True,
+                on_click=lambda view, a=sel_idx: self._grab_settings_from_local_premium(a, show_bulletin=True),
+            ),
+        ])
 
-        for acc_info in active_accs:
-            acc_idx = acc_info.get("acc_idx", 0)
-            uid = acc_info.get("user_id", 0)
-            name = acc_info.get("name", f"Аккаунт {acc_idx + 1}")
-            extra = acc_info.get("extra", "")
-            is_curr = acc_info.get("is_current", False)
-
-            curr_tag = " [ТЕКУЩИЙ АКТИВНЫЙ]" if is_curr else ""
-            section_title = f"👤 {name}{extra} (ID: {uid}){curr_tag}"
-
-            default_name_c = 0
-            default_prof_c = 0
-
-            cur_prem = bool(self._get_slot_val(acc_idx, "premium", True))
-            cur_name_c = int(self._get_slot_val(acc_idx, "name_color", default_name_c) or 0)
-            cur_prof_c = int(self._get_slot_val(acc_idx, "profile_color", default_prof_c) or 0)
-
-            if cur_name_c < 0 or cur_name_c >= len(NAME_AND_REPLY_COLORS):
-                cur_name_c = default_name_c
-            if cur_prof_c < 0 or cur_prof_c >= len(PROFILE_COLORS):
-                cur_prof_c = default_prof_c
-
-            cur_name_bg = self._get_slot_val(acc_idx, "name_bg_emoji_id", DEFAULT_NAME_BG_EMOJI) or ""
-            cur_prof_bg = self._get_slot_val(acc_idx, "profile_bg_emoji_id", DEFAULT_PROFILE_BG_EMOJI) or ""
-            cur_em_id = self._get_slot_val(acc_idx, "emoji_status_id", DEFAULT_EMOJI_STATUS_ID) or ""
-
-            items.extend([
-                Divider(text=section_title),
+        if len(active_accs) > 1:
+            items.append(
                 Text(
-                    text=f"🚀 Опубликовать профиль {name}",
-                    subtext=f"Отправить цвета и узоры для ID {uid} на сервер",
+                    text="🌐 Опубликовать ВСЕ аккаунты сразу",
+                    subtext=f"Отправить цвета всех {len(active_accs)} аккаунтов на сервер в 1 клик",
                     icon="msg_send",
                     accent=True,
-                    on_click=lambda view, a=acc_idx: self.push_specific_account(a, show_ui_bulletin=True),
-                ),
-                Switch(
-                    key=f"slot_{acc_idx}_premium",
-                    text=f"Telegram Premium [{name}]",
-                    default=cur_prem,
-                    subtext=f"Отображать Premium-статус и звездочку для {name}",
-                    icon="msg_premium",
-                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "premium", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
-                ),
-                Selector(
-                    key=f"slot_{acc_idx}_name_color",
-                    text=f"Цвет имени и реплаев [{name}]",
-                    default=cur_name_c,
-                    items=NAME_AND_REPLY_COLORS,
-                    icon="msg_palette",
-                    on_change=lambda idx, a=acc_idx: (self._set_slot_val(a, "name_color", idx), run_on_ui_thread(self._apply_all_to_all_accounts)),
-                ),
-                Input(
-                    key=f"slot_{acc_idx}_name_bg_emoji_id",
-                    text=f"Узор имени и реплаев [{name}]",
-                    default=cur_name_bg,
-                    subtext="Document ID эмодзи-узора (оставьте пустым, если не нужен)",
-                    icon="msg_background",
-                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "name_bg_emoji_id", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
-                ),
-                Selector(
-                    key=f"slot_{acc_idx}_profile_color",
-                    text=f"Цвет обложки [{name}]",
-                    default=cur_prof_c,
-                    items=PROFILE_COLORS,
-                    icon="msg_theme",
-                    on_change=lambda idx, a=acc_idx: (self._set_slot_val(a, "profile_color", idx), run_on_ui_thread(self._apply_all_to_all_accounts)),
-                ),
-                Input(
-                    key=f"slot_{acc_idx}_profile_bg_emoji_id",
-                    text=f"Узор обложки [{name}]",
-                    default=cur_prof_bg,
-                    subtext="ID эмодзи-узора (значки вокруг аватарки, оставьте пустым)",
-                    icon="msg_background",
-                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "profile_bg_emoji_id", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
-                ),
-                Input(
-                    key=f"slot_{acc_idx}_emoji_status_id",
-                    text=f"Эмодзи-статус [{name}]",
-                    default=cur_em_id,
-                    subtext="ID эмодзи-статуса рядом с именем (оставьте пустым, если не нужен)",
-                    icon="msg_emoji",
-                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "emoji_status_id", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
-                ),
-            ])
+                    on_click=lambda view: self.push_all_accounts(show_ui_bulletin=True),
+                )
+            )
 
         items.extend([
-            Divider(text="Действия"),
+            Text(
+                text="⚡ Быстрая дельта-синхронизация",
+                subtext="Запросить только новые и измененные профили пользователей",
+                icon="msg_sync",
+                on_click=lambda view: self.sync_delta_updates_from_server(show_bulletin=True),
+            ),
+            Divider(text="🛠️ Инструменты и Справка"),
+            Text(
+                text="❓ Как узнать ID эмодзи или узора?",
+                subtext="Пошаговая инструкция по получению Document ID",
+                icon="msg_info",
+                accent=True,
+                on_click=lambda view: self._show_emoji_help_dialog(),
+            ),
+            Text(
+                text=f"📥 Полная синхронизация базы ({total_cached} в кэше)",
+                subtext="Удалить старый кэш и скачать актуальную базу начисто",
+                icon="msg_download",
+                on_click=lambda view: self._interactive_sync_bottom_sheet(),
+            ),
             Text(
                 text="🧹 Очистить локальный кэш",
+                subtext="Удалить все сохраненные данные профилей с устройства",
                 icon="msg_delete",
                 red=True,
                 on_click=self._interactive_clear_cache_dialog,

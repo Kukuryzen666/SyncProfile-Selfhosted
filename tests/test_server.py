@@ -41,7 +41,7 @@ class TestSyncProfilePluginSyntax(unittest.TestCase):
         self.assertIn("__name__", constants)
         self.assertEqual(constants["__name__"], "SyncProfile")
         self.assertIn("__version__", constants)
-        self.assertEqual(constants["__version__"], "10.2.5")
+        self.assertEqual(constants["__version__"], "11.0.0-beta.1")
 
     def test_build_peer_color_logic(self):
         def mock_build_peer_color(color_id, bg_emoji_id):
