@@ -2669,6 +2669,25 @@ class Plugin(BasePlugin):
             bulletins.show_info(f"Скопировано: {text}")
 
     def create_settings(self) -> List[Any]:
+        try:
+            return self._build_settings_items()
+        except Exception as e:
+            logger.error(f"create_settings error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return [
+                Header(text="Синхронизация профилей SyncProfile"),
+                Text(text=f"Ошибка настроек: {e}", red=True),
+                Switch(
+                    key="enable_sync",
+                    text="Включить SyncProfile",
+                    default=True,
+                    subtext="Отображать кастомные цвета, узоры и статусы пользователей",
+                    icon="msg_sync",
+                ),
+            ]
+
+    def _build_settings_items(self) -> List[Any]:
         with self._sync_lock:
             total_cached = len(self._profiles_cache)
 
@@ -2726,15 +2745,20 @@ class Plugin(BasePlugin):
                 tag = " (Активный)" if a.get("is_current") else ""
                 acc_labels.append(f"{idx + 1}. {u_name}{tag}")
 
+            sel_list_idx = 0
+            for i, a in enumerate(active_accs):
+                if a["acc_idx"] == saved_slot:
+                    sel_list_idx = i
+                    break
+
             items.append(
                 Selector(
                     key="_ui_selected_acc_slot",
                     text="Выбор аккаунта",
-                    default=saved_slot,
+                    default=sel_list_idx,
                     items=acc_labels,
-                    subtext="Выберите аккаунт для редактирования его профиля",
                     icon="msg_user",
-                    on_change=lambda val: self.set_setting("_ui_selected_acc_slot", val, reload_settings=True),
+                    on_change=lambda val: self.set_setting("_ui_selected_acc_slot", active_accs[val]["acc_idx"] if (isinstance(val, int) and 0 <= val < len(active_accs)) else 0, reload_settings=True),
                 )
             )
 
@@ -2747,9 +2771,9 @@ class Plugin(BasePlugin):
         if cur_prof_c < 0 or cur_prof_c >= len(PROFILE_COLORS):
             cur_prof_c = 0
 
-        cur_name_bg = str(self._get_slot_val(sel_idx, "name_bg_emoji_id", "") or "").strip()
-        cur_prof_bg = str(self._get_slot_val(sel_idx, "profile_bg_emoji_id", "") or "").strip()
-        cur_em_id = str(self._get_slot_val(sel_idx, "emoji_status_id", "") or "").strip()
+        cur_name_bg = str(self._get_slot_val(sel_idx, "name_bg_emoji_id", DEFAULT_NAME_BG_EMOJI) or "").strip()
+        cur_prof_bg = str(self._get_slot_val(sel_idx, "profile_bg_emoji_id", DEFAULT_PROFILE_BG_EMOJI) or "").strip()
+        cur_em_id = str(self._get_slot_val(sel_idx, "emoji_status_id", DEFAULT_EMOJI_STATUS_ID) or "").strip()
 
         name_c_title = NAME_AND_REPLY_COLORS[cur_name_c]
         prof_c_title = PROFILE_COLORS[cur_prof_c]
@@ -2778,36 +2802,40 @@ class Plugin(BasePlugin):
                 text="Цвет имени и полосы ответов",
                 default=cur_name_c,
                 items=NAME_AND_REPLY_COLORS,
-                subtext=f"Текущий: {name_c_title}",
                 icon="msg_palette",
                 on_change=lambda idx, a=sel_idx: (self._set_slot_val(a, "name_color", idx), run_on_ui_thread(self._apply_all_to_all_accounts)),
             ),
-            Text(
+            Input(
+                key=f"slot_{sel_idx}_name_bg_emoji_id",
                 text="Узор имени и реплаев",
-                subtext=f"{'✨ ID: ' + cur_name_bg if cur_name_bg else 'Не установлен (нажмите для ввода)'}",
+                default=cur_name_bg,
+                subtext="Document ID или ссылка (оставьте пустым для удаления)",
                 icon="msg_background",
-                on_click=lambda view, a=sel_idx: self._interactive_input_emoji_id(a, "name_bg_emoji_id", "Узор имени и реплаев"),
+                on_change=lambda val, a=sel_idx: (self._set_slot_val(a, "name_bg_emoji_id", _sanitize_emoji_id_input(val)), run_on_ui_thread(self._apply_all_to_all_accounts)),
             ),
             Selector(
                 key=f"slot_{sel_idx}_profile_color",
                 text="Цвет фона профиля (обложки)",
                 default=cur_prof_c,
                 items=PROFILE_COLORS,
-                subtext=f"Текущий: {prof_c_title}",
                 icon="msg_theme",
                 on_change=lambda idx, a=sel_idx: (self._set_slot_val(a, "profile_color", idx), run_on_ui_thread(self._apply_all_to_all_accounts)),
             ),
-            Text(
+            Input(
+                key=f"slot_{sel_idx}_profile_bg_emoji_id",
                 text="Узор фона профиля (обложки)",
-                subtext=f"{'✨ ID: ' + cur_prof_bg if cur_prof_bg else 'Не установлен (значки вокруг аватара)'}",
+                default=cur_prof_bg,
+                subtext="Document ID или ссылка (значки вокруг аватара)",
                 icon="msg_background",
-                on_click=lambda view, a=sel_idx: self._interactive_input_emoji_id(a, "profile_bg_emoji_id", "Узор фона профиля"),
+                on_change=lambda val, a=sel_idx: (self._set_slot_val(a, "profile_bg_emoji_id", _sanitize_emoji_id_input(val)), run_on_ui_thread(self._apply_all_to_all_accounts)),
             ),
-            Text(
+            Input(
+                key=f"slot_{sel_idx}_emoji_status_id",
                 text="Премиум эмодзи-статус",
-                subtext=f"{'⭐ ID: ' + cur_em_id if cur_em_id else 'Не установлен (значок рядом с именем)'}",
+                default=cur_em_id,
+                subtext="Document ID или ссылка (значок рядом с именем)",
                 icon="msg_emoji",
-                on_click=lambda view, a=sel_idx: self._interactive_input_emoji_id(a, "emoji_status_id", "Премиум эмодзи-статус"),
+                on_change=lambda val, a=sel_idx: (self._set_slot_val(a, "emoji_status_id", _sanitize_emoji_id_input(val)), run_on_ui_thread(self._apply_all_to_all_accounts)),
             ),
             Text(
                 text=f"🚀 Опубликовать профиль {sel_name}",
